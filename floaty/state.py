@@ -37,10 +37,52 @@ _MANUAL_PLACEMENT_SOURCE_SIDE = {
     "RIGHT": "RIGHT",
 }
 _MIN_ABSOLUTE_VERTICAL_REMAINDER = 64.0
+_MIN_ABSOLUTE_SPLIT_REMAINDER = 32.0
+_MIN_ABSOLUTE_STRIP_SIZE = 16.0
+_NODE_EDITOR_UI_TYPES = {
+    "ShaderNodeTree",
+    "CompositorNodeTree",
+    "GeometryNodeTree",
+    "TextureNodeTree",
+}
 
 
 def supports_area(area_type):
     return area_type not in {"TOPBAR", "STATUSBAR"}
+
+
+def _screen_supports_temp_override(screen):
+    if screen is None:
+        return False
+    try:
+        screen_name = getattr(screen, "name", "")
+        if screen_name.lower().startswith("temp"):
+            return False
+        if getattr(screen, "show_fullscreen", False):
+            return False
+        data_screen = bpy.data.screens.get(screen.name)
+        return data_screen is not None and data_screen.as_pointer() == screen.as_pointer()
+    except (AttributeError, ReferenceError, TypeError):
+        return False
+
+
+def _sanitize_temp_override_kwargs(override_kwargs):
+    # Blender 5.1 rejects explicit screen switching for temporary/fullscreen
+    # screens. Area operators only need window/area/region, so omit screen.
+    if (
+        override_kwargs.get("window") is not None and
+        override_kwargs.get("area") is not None and
+        "screen" in override_kwargs
+    ):
+        override_kwargs = dict(override_kwargs)
+        override_kwargs.pop("screen", None)
+        return override_kwargs
+
+    screen = override_kwargs.get("screen")
+    if screen is not None and not _screen_supports_temp_override(screen):
+        override_kwargs = dict(override_kwargs)
+        override_kwargs.pop("screen", None)
+    return override_kwargs
 
 
 def _log_width_debug(event, **values):
@@ -78,14 +120,32 @@ def _describe_window(window):
 def _describe_area(window, area):
     if area is None:
         return f"{_describe_window(window)},area=None"
-    ui_type = getattr(area, "ui_type", "")
     return (
         f"{area_type_label(area.type)}({area.type}),"
         f"{_describe_window(window)},"
         f"area={area.as_pointer()},"
-        f"ui={ui_type},"
         f"rect=({_format_rect_from_values(area.x, area.y, area.width, area.height)})"
     )
+
+
+def _safe_area_ui_type(area):
+    if area is None:
+        return ""
+    if getattr(area, "type", "") == "NODE_EDITOR":
+        return _safe_node_editor_ui_type(area)
+    return getattr(area, "ui_type", "")
+
+
+def _safe_node_editor_ui_type(area):
+    try:
+        spaces = getattr(area, "spaces", [])
+        active_space = getattr(spaces, "active", None)
+        if active_space is None:
+            return ""
+        tree_type = getattr(active_space, "tree_type", "")
+        return tree_type if tree_type in _NODE_EDITOR_UI_TYPES else ""
+    except (AttributeError, ReferenceError, TypeError):
+        return ""
 
 
 def _describe_area_state(area_type, area_state):
@@ -362,7 +422,7 @@ def iter_placeable_areas(window_manager, detached_window=None):
             continue
 
         screen = window.screen
-        if screen is None:
+        if screen is None or not _screen_supports_temp_override(screen):
             continue
 
         for area in screen.areas:
@@ -479,7 +539,8 @@ def _first_placeable_window(window_manager):
         if (
             window.as_pointer() in _detached_windows or
             window.as_pointer() in _closing_window_ptrs or
-            window.screen is None
+            window.screen is None or
+            not _screen_supports_temp_override(window.screen)
         ):
             continue
         return window
@@ -511,7 +572,7 @@ def _capture_area_state(area):
         "height": area.height,
         "center_x": area.x + (area.width / 2.0),
         "center_y": area.y + (area.height / 2.0),
-        "ui_type": getattr(area, "ui_type", ""),
+        "ui_type": _safe_area_ui_type(area),
     }
 
 
@@ -593,6 +654,13 @@ def _range_overlap(start_a, end_a, start_b, end_b):
 
 def _clamp_split_factor(factor):
     return max(0.05, min(0.95, factor))
+
+
+def _clamp_absolute_source_ratio(source_size, target_size):
+    target_size = max(1.0, float(target_size))
+    minimum_ratio = min(0.49, _MIN_ABSOLUTE_STRIP_SIZE / target_size)
+    maximum_ratio = max(minimum_ratio, 1.0 - (_MIN_ABSOLUTE_SPLIT_REMAINDER / target_size))
+    return max(minimum_ratio, min(maximum_ratio, float(source_size) / target_size))
 
 
 def _combine_rects(rect_a, rect_b):
@@ -870,6 +938,62 @@ def _compute_manual_split_geometry(target_area, source_area_state, placement):
     }
 
 
+def _compute_absolute_split_geometry(target_area, source_area_state, placement):
+    target_x = float(target_area.x)
+    target_y = float(target_area.y)
+    target_width = max(1.0, float(target_area.width))
+    target_height = max(1.0, float(target_area.height))
+
+    if placement in {"TOP", "BOTTOM"}:
+        source_size = max(1.0, float((source_area_state or {}).get("height", target_height)))
+        source_ratio = _clamp_absolute_source_ratio(source_size, target_height)
+        factor = 1.0 - source_ratio if placement == "TOP" else source_ratio
+
+        _log_height_debug(
+            "absolute_split_geometry",
+            placement=placement,
+            target_height=int(round(target_height)),
+            detached_height=int(round(source_size)),
+            source_ratio=round(source_ratio, 4),
+            factor=round(factor, 4),
+            source_side=_MANUAL_PLACEMENT_SOURCE_SIDE[placement],
+        )
+
+        return {
+            "direction": "HORIZONTAL",
+            "factor": factor,
+            "source_side": _MANUAL_PLACEMENT_SOURCE_SIDE[placement],
+            "cursor": (
+                int(round(target_x + (target_width * 0.5))),
+                int(round(target_y + (target_height * factor))),
+            ),
+        }
+
+    source_size = max(1.0, float((source_area_state or {}).get("width", target_width)))
+    source_ratio = _clamp_absolute_source_ratio(source_size, target_width)
+    factor = source_ratio if placement == "LEFT" else 1.0 - source_ratio
+
+    _log_width_debug(
+        "absolute_split_geometry",
+        placement=placement,
+        target_width=int(round(target_width)),
+        detached_width=int(round(source_size)),
+        source_ratio=round(source_ratio, 4),
+        factor=round(factor, 4),
+        source_side=_MANUAL_PLACEMENT_SOURCE_SIDE[placement],
+    )
+
+    return {
+        "direction": "VERTICAL",
+        "factor": factor,
+        "source_side": _MANUAL_PLACEMENT_SOURCE_SIDE[placement],
+        "cursor": (
+            int(round(target_x + (target_width * factor))),
+            int(round(target_y + (target_height * 0.5))),
+        ),
+    }
+
+
 def _area_state_for_absolute_placement(source_area_state, screen_bounds, placement):
     absolute_state = dict(source_area_state or {})
     if not absolute_state or not screen_bounds:
@@ -895,17 +1019,36 @@ def _area_state_for_absolute_edge_areas(source_area_state, edge_areas, placement
 
     if placement in {"TOP", "BOTTOM"}:
         shortest_edge_height = min(max(1.0, float(area.height)) for area in edge_areas)
-        minimum_remainder = min(
-            _MIN_ABSOLUTE_VERTICAL_REMAINDER,
-            shortest_edge_height * 0.35,
-        )
-        max_strip_height = max(1.0, shortest_edge_height - minimum_remainder)
+        if shortest_edge_height < (_MIN_ABSOLUTE_SPLIT_REMAINDER * 2.0):
+            max_strip_height = shortest_edge_height
+        else:
+            minimum_remainder = min(
+                _MIN_ABSOLUTE_VERTICAL_REMAINDER,
+                shortest_edge_height * 0.35,
+            )
+            minimum_remainder = max(
+                _MIN_ABSOLUTE_SPLIT_REMAINDER,
+                minimum_remainder,
+            )
+            max_strip_height = max(1.0, shortest_edge_height - minimum_remainder)
         absolute_state["height"] = min(
             max(1.0, float(absolute_state.get("height", max_strip_height))),
             max(1.0, max_strip_height),
         )
     else:
-        max_strip_width = min(max(1.0, float(area.width)) for area in edge_areas) * 0.95
+        narrowest_edge_width = min(max(1.0, float(area.width)) for area in edge_areas)
+        minimum_remainder = min(
+            _MIN_ABSOLUTE_VERTICAL_REMAINDER,
+            narrowest_edge_width * 0.35,
+        )
+        minimum_remainder = max(
+            _MIN_ABSOLUTE_SPLIT_REMAINDER,
+            minimum_remainder,
+        )
+        max_strip_width = max(
+            _MIN_ABSOLUTE_STRIP_SIZE,
+            narrowest_edge_width - minimum_remainder,
+        )
         absolute_state["width"] = min(
             max(1.0, float(absolute_state.get("width", max_strip_width))),
             max(1.0, max_strip_width),
@@ -944,6 +1087,16 @@ def _capture_detached_window_area_state(detached_window, fallback_state=None):
 
 def _restore_area_type(area, area_type, ui_type):
     area.type = area_type
+    if not ui_type:
+        return
+
+    if area_type == "NODE_EDITOR" and ui_type in _NODE_EDITOR_UI_TYPES:
+        try:
+            area.spaces.active.tree_type = ui_type
+            return
+        except (AttributeError, ReferenceError, TypeError, ValueError):
+            pass
+
     if ui_type:
         try:
             area.ui_type = ui_type
@@ -1079,6 +1232,15 @@ def _pick_absolute_split_area(candidates, new_areas, target_rect, placement):
     )
 
 
+def _absolute_area_requires_split(area, source_area_state, placement):
+    size_key = _placement_size_key(placement)
+    target_size = max(1.0, float(getattr(area, size_key)))
+    strip_size = max(1.0, float((source_area_state or {}).get(size_key, target_size)))
+    if placement in {"LEFT", "RIGHT"}:
+        return target_size >= (_MIN_ABSOLUTE_STRIP_SIZE + _MIN_ABSOLUTE_SPLIT_REMAINDER)
+    return (target_size - strip_size) >= _MIN_ABSOLUTE_SPLIT_REMAINDER
+
+
 def _join_area_into_area(window, screen, area_to_join, target_area):
     if (
         window is None or
@@ -1102,12 +1264,12 @@ def _join_area_into_area(window, screen, area_to_join, target_area):
         override_kwargs["region"] = source_region
 
     try:
-        with bpy.context.temp_override(**override_kwargs):
+        with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
             result = bpy.ops.screen.area_join(
                 source_xy=(int(round(source_x)), int(round(source_y))),
                 target_xy=(int(round(target_x)), int(round(target_y))),
             )
-    except RuntimeError as error:
+    except (RuntimeError, TypeError) as error:
         _log_width_debug("place_absolute_join_failed", reason=repr(error))
         return None
 
@@ -1118,6 +1280,20 @@ def _join_area_into_area(window, screen, area_to_join, target_area):
     center_x, center_y = _rect_center(combined_rect)
     joined_area = _area_at_point(screen, center_x, center_y)
     return joined_area
+
+
+def _join_areas_either_direction(window, screen, area_a, area_b):
+    joined_area = _join_area_into_area(window, screen, area_a, area_b)
+    if joined_area is not None:
+        return joined_area
+
+    if (
+        _find_area_by_ptr(screen, area_a.as_pointer()) is None or
+        _find_area_by_ptr(screen, area_b.as_pointer()) is None
+    ):
+        return None
+
+    return _join_area_into_area(window, screen, area_b, area_a)
 
 
 def _schedule_restore_absolute_area(
@@ -1234,6 +1410,27 @@ def _schedule_finalize_absolute_place(
         strip_areas = []
         for record in split_records:
             target_rect = record["target_rect"]
+            existing_strip_area_ptr = record.get("existing_strip_area_ptr")
+            if existing_strip_area_ptr is not None:
+                strip_area = _find_area_by_ptr(screen, existing_strip_area_ptr)
+                if strip_area is None:
+                    attempts["count"] += 1
+                    if attempts["count"] >= 20:
+                        _log_action_debug(
+                            "attach_failed",
+                            action=action_name,
+                            placement=placement,
+                            reason="existing_strip_missing",
+                            target_rect=f"({_format_rect_from_values(target_rect['x'], target_rect['y'], target_rect['width'], target_rect['height'])})",
+                        )
+                        _end_layout_operation()
+                        return None
+                    return 0.05
+
+                if strip_area.as_pointer() not in {area.as_pointer() for area in strip_areas}:
+                    strip_areas.append(strip_area)
+                continue
+
             before_area_ptrs = record["before_area_ptrs"]
             candidate_areas = _areas_with_centers_in_rect(screen, target_rect)
             new_areas = [
@@ -1311,46 +1508,169 @@ def _schedule_finalize_absolute_place(
             _end_layout_operation()
             return None
 
-        if placement in {"LEFT", "RIGHT"}:
-            strip_areas.sort(key=lambda area: (float(area.y), float(area.x)))
-        else:
-            strip_areas.sort(key=lambda area: (float(area.x), float(area.y)))
+        def _strip_sort_key(area):
+            if placement in {"LEFT", "RIGHT"}:
+                return (float(area.y), float(area.x))
+            return (float(area.x), float(area.y))
 
-        joined_area = strip_areas[0]
-        final_rect = _capture_rect(joined_area)
-        for strip_area in strip_areas[1:]:
-            final_rect = _combine_rects(final_rect, _capture_rect(strip_area))
-            next_joined_area = _join_area_into_area(target_window, screen, strip_area, joined_area)
-            if next_joined_area is not None:
-                joined_area = next_joined_area
+        strip_areas.sort(key=_strip_sort_key)
+        for strip_area in strip_areas:
+            _restore_area_type(strip_area, area_type, ui_type)
 
-        _schedule_restore_absolute_area(
-            window_manager,
-            target_window_ptr,
-            final_rect,
-            area_type,
-            ui_type,
-            placement,
-            len(strip_areas),
-            source_window_ptr_to_close,
-            source_area_ptr_for_close["value"],
-            action_name,
-        )
+        def _live_strip_areas(strip_area_ptrs):
+            target_window = _find_window_by_ptr(window_manager, target_window_ptr)
+            if target_window is None or target_window.screen is None:
+                return None, None, []
 
-        if placement in {"LEFT", "RIGHT"}:
-            _log_width_debug(
-                "place_absolute_joined",
+            screen = target_window.screen
+            live_areas = []
+            seen_ptrs = set()
+            for area_ptr in strip_area_ptrs:
+                live_area = _find_area_by_ptr(screen, area_ptr)
+                if live_area is None or live_area.as_pointer() in seen_ptrs:
+                    continue
+                seen_ptrs.add(live_area.as_pointer())
+                live_areas.append(live_area)
+            live_areas.sort(key=_strip_sort_key)
+            return target_window, screen, live_areas
+
+        def _finish_unjoined(reason, strip_area_ptrs):
+            target_window, screen, live_areas = _live_strip_areas(strip_area_ptrs)
+            if target_window is None or screen is None:
+                _end_layout_operation()
+                return None
+
+            restored_ptrs = set()
+            for live_area in live_areas:
+                _restore_area_type(live_area, area_type, ui_type)
+                restored_ptrs.add(live_area.as_pointer())
+
+            if not restored_ptrs:
+                _log_action_debug(
+                    "attach_failed",
+                    action=action_name,
+                    placement=placement,
+                    reason=f"{reason}_restore_missing",
+                )
+                _end_layout_operation()
+                return None
+
+            _log_action_debug(
+                "attached_unjoined",
+                action=action_name,
                 placement=placement,
-                strips=len(strip_areas),
-            )
-        else:
-            _log_height_debug(
-                "place_absolute_joined",
-                placement=placement,
-                strips=len(strip_areas),
+                editor=area_type_label(area_type),
+                reason=reason,
+                strips=len(restored_ptrs),
+                closed_source_window=source_window_ptr_to_close or "",
+                closed_source_area=source_area_ptr_for_close["value"] or "",
             )
 
-        tag_redraw_all(window_manager)
+            if (
+                source_window_ptr_to_close is not None and
+                source_area_ptr_for_close["value"] is not None and
+                source_area_ptr_for_close["value"] not in restored_ptrs
+            ):
+                def _finish_after_close():
+                    tag_redraw_all(window_manager)
+                    _end_layout_operation()
+
+                _schedule_close_source_area(
+                    window_manager,
+                    source_window_ptr_to_close,
+                    source_area_ptr_for_close["value"],
+                    _finish_after_close,
+                )
+                return None
+
+            tag_redraw_all(window_manager)
+            _end_layout_operation()
+            return None
+
+        strip_area_ptrs = {"values": [area.as_pointer() for area in strip_areas]}
+        join_attempts = {"count": 0}
+        initial_strip_count = len(strip_areas)
+
+        def _join_next_strip():
+            target_window, screen, live_areas = _live_strip_areas(strip_area_ptrs["values"])
+            if target_window is None or screen is None:
+                _end_layout_operation()
+                return None
+
+            if not live_areas:
+                return _finish_unjoined("join_missing", strip_area_ptrs["values"])
+
+            if len(live_areas) == 1:
+                final_rect = _capture_rect(live_areas[0])
+                _schedule_restore_absolute_area(
+                    window_manager,
+                    target_window_ptr,
+                    final_rect,
+                    area_type,
+                    ui_type,
+                    placement,
+                    initial_strip_count,
+                    source_window_ptr_to_close,
+                    source_area_ptr_for_close["value"],
+                    action_name,
+                )
+
+                if placement in {"LEFT", "RIGHT"}:
+                    _log_width_debug(
+                        "place_absolute_joined",
+                        placement=placement,
+                        strips=initial_strip_count,
+                    )
+                else:
+                    _log_height_debug(
+                        "place_absolute_joined",
+                        placement=placement,
+                        strips=initial_strip_count,
+                    )
+
+                tag_redraw_all(window_manager)
+                return None
+
+            for index in range(len(live_areas) - 1):
+                first_area = live_areas[index]
+                second_area = live_areas[index + 1]
+                joined_area = _join_areas_either_direction(
+                    target_window,
+                    screen,
+                    second_area,
+                    first_area,
+                )
+                if joined_area is None:
+                    continue
+
+                joined_ptr = joined_area.as_pointer()
+                consumed_ptrs = {first_area.as_pointer(), second_area.as_pointer()}
+                strip_area_ptrs["values"] = [
+                    area_ptr for area_ptr in strip_area_ptrs["values"]
+                    if area_ptr not in consumed_ptrs
+                ]
+                strip_area_ptrs["values"].append(joined_ptr)
+                join_attempts["count"] = 0
+                tag_redraw_all(window_manager)
+                return 0.05
+
+            join_attempts["count"] += 1
+            if join_attempts["count"] < 20:
+                return 0.05
+
+            _log_action_debug(
+                "attach_failed",
+                action=action_name,
+                placement=placement,
+                reason="join_failed",
+                strips=len(live_areas),
+            )
+            return _finish_unjoined(
+                "join_failed",
+                [area.as_pointer() for area in live_areas],
+            )
+
+        bpy.app.timers.register(_join_next_strip, first_interval=0.05)
         return None
 
     bpy.app.timers.register(_finalize, first_interval=0.0)
@@ -1379,9 +1699,9 @@ def _close_source_area(window_manager, source_window_ptr, source_area_ptr):
         override_kwargs["region"] = source_region
 
     try:
-        with bpy.context.temp_override(**override_kwargs):
+        with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
             result = bpy.ops.screen.area_close()
-    except RuntimeError:
+    except (RuntimeError, TypeError):
         return False
 
     return "FINISHED" in result
@@ -1399,7 +1719,7 @@ def _prepare_source_area_for_close(window_manager, source_window_ptr, source_are
     original_state = {
         "area_ptr": source_area_ptr,
         "type": source_area.type,
-        "ui_type": getattr(source_area, "ui_type", ""),
+        "ui_type": _safe_area_ui_type(source_area),
     }
     if source_area.type == "VIEW_3D":
         _restore_area_type(source_area, "INFO", "")
@@ -1647,13 +1967,13 @@ def recreate_editor_in_source_window(window_manager, detached_window):
         override_kwargs["region"] = target_region
 
     try:
-        with bpy.context.temp_override(**override_kwargs):
+        with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
             result = bpy.ops.screen.area_split(
                 direction=split_geometry["direction"],
                 factor=split_geometry["factor"],
                 cursor=split_geometry["cursor"],
             )
-    except RuntimeError:
+    except (RuntimeError, TypeError):
         return False
 
     if "FINISHED" not in result:
@@ -1694,6 +2014,7 @@ def place_detached_window(window_manager, detached_window, target_window_ptr, ta
     if (
         target_window is None or
         target_window.screen is None or
+        not _screen_supports_temp_override(target_window.screen) or
         is_detached_window(target_window)
     ):
         _log_action_debug(
@@ -1767,13 +2088,13 @@ def place_detached_window(window_manager, detached_window, target_window_ptr, ta
         override_kwargs["region"] = target_region
 
     try:
-        with bpy.context.temp_override(**override_kwargs):
+        with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
             result = bpy.ops.screen.area_split(
                 direction=split_geometry["direction"],
                 factor=split_geometry["factor"],
                 cursor=split_geometry["cursor"],
             )
-    except RuntimeError:
+    except (RuntimeError, TypeError):
         _end_layout_operation()
         return False
 
@@ -1827,6 +2148,7 @@ def place_detached_window_absolute(window_manager, detached_window, placement):
     if (
         target_window is None or
         target_window.screen is None or
+        not _screen_supports_temp_override(target_window.screen) or
         is_detached_window(target_window)
     ):
         _end_layout_operation()
@@ -1890,8 +2212,22 @@ def place_detached_window_absolute(window_manager, detached_window, placement):
             continue
 
         target_rect = _capture_rect(edge_area)
+        if not _absolute_area_requires_split(edge_area, source_area_state, placement):
+            if placement in {"LEFT", "RIGHT"}:
+                continue
+
+            split_records.append(
+                {
+                    "target_rect": target_rect,
+                    "existing_strip_area_ptr": edge_area.as_pointer(),
+                    "target_area_type": edge_area.type,
+                    "target_ui_type": _safe_area_ui_type(edge_area),
+                }
+            )
+            continue
+
         before_area_ptrs = {area.as_pointer() for area in screen.areas}
-        split_geometry = _compute_manual_split_geometry(edge_area, source_area_state, placement)
+        split_geometry = _compute_absolute_split_geometry(edge_area, source_area_state, placement)
         target_region = _preferred_region_for_area(edge_area)
         override_kwargs = {
             "window": target_window,
@@ -1902,13 +2238,13 @@ def place_detached_window_absolute(window_manager, detached_window, placement):
             override_kwargs["region"] = target_region
 
         try:
-            with bpy.context.temp_override(**override_kwargs):
+            with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
                 result = bpy.ops.screen.area_split(
                     direction=split_geometry["direction"],
                     factor=split_geometry["factor"],
                     cursor=split_geometry["cursor"],
                 )
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             continue
 
         if "FINISHED" not in result:
@@ -1921,7 +2257,7 @@ def place_detached_window_absolute(window_manager, detached_window, placement):
                 "source_side": split_geometry["source_side"],
                 "split_area_ptr": edge_area.as_pointer(),
                 "target_area_type": edge_area.type,
-                "target_ui_type": getattr(edge_area, "ui_type", ""),
+                "target_ui_type": _safe_area_ui_type(edge_area),
             }
         )
 
@@ -1983,6 +2319,7 @@ def move_area_to_target(window_manager, source_window, source_area, target_windo
     if (
         target_window is None or
         target_window.screen is None or
+        not _screen_supports_temp_override(target_window.screen) or
         is_detached_window(target_window)
     ):
         _log_action_debug(
@@ -2038,13 +2375,13 @@ def move_area_to_target(window_manager, source_window, source_area, target_windo
         override_kwargs["region"] = target_region
 
     try:
-        with bpy.context.temp_override(**override_kwargs):
+        with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
             result = bpy.ops.screen.area_split(
                 direction=split_geometry["direction"],
                 factor=split_geometry["factor"],
                 cursor=split_geometry["cursor"],
             )
-    except RuntimeError:
+    except (RuntimeError, TypeError):
         _end_layout_operation()
         return False
 
@@ -2103,6 +2440,7 @@ def _execute_move_area_absolute(window_manager, source_window_ptr, source_area_p
     if (
         target_window is None or
         target_window.screen is None or
+        not _screen_supports_temp_override(target_window.screen) or
         is_detached_window(target_window)
     ):
         _end_layout_operation()
@@ -2137,8 +2475,22 @@ def _execute_move_area_absolute(window_manager, source_window_ptr, source_area_p
             continue
 
         target_rect = _capture_rect(edge_area)
+        if not _absolute_area_requires_split(edge_area, source_area_state, placement):
+            if placement in {"LEFT", "RIGHT"}:
+                continue
+
+            split_records.append(
+                {
+                    "target_rect": target_rect,
+                    "existing_strip_area_ptr": edge_area.as_pointer(),
+                    "target_area_type": edge_area.type,
+                    "target_ui_type": _safe_area_ui_type(edge_area),
+                }
+            )
+            continue
+
         before_area_ptrs = {area.as_pointer() for area in screen.areas}
-        split_geometry = _compute_manual_split_geometry(edge_area, source_area_state, placement)
+        split_geometry = _compute_absolute_split_geometry(edge_area, source_area_state, placement)
         target_region = _preferred_region_for_area(edge_area)
         override_kwargs = {
             "window": target_window,
@@ -2149,13 +2501,13 @@ def _execute_move_area_absolute(window_manager, source_window_ptr, source_area_p
             override_kwargs["region"] = target_region
 
         try:
-            with bpy.context.temp_override(**override_kwargs):
+            with bpy.context.temp_override(**_sanitize_temp_override_kwargs(override_kwargs)):
                 result = bpy.ops.screen.area_split(
                     direction=split_geometry["direction"],
                     factor=split_geometry["factor"],
                     cursor=split_geometry["cursor"],
                 )
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             continue
 
         if "FINISHED" not in result:
@@ -2168,7 +2520,7 @@ def _execute_move_area_absolute(window_manager, source_window_ptr, source_area_p
                 "source_side": split_geometry["source_side"],
                 "split_area_ptr": edge_area.as_pointer(),
                 "target_area_type": edge_area.type,
-                "target_ui_type": getattr(edge_area, "ui_type", ""),
+                "target_ui_type": _safe_area_ui_type(edge_area),
             }
         )
 

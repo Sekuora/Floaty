@@ -25,6 +25,31 @@ _HEADER_TYPES = [
 _appended_headers = []
 
 
+def _iter_header_types():
+    for type_name in _HEADER_TYPES:
+        header_type = getattr(bpy.types, type_name, None)
+        if header_type is not None:
+            yield header_type
+
+
+def _is_floaty_header_draw_func(draw_func):
+    return (
+        getattr(draw_func, "__name__", "") == "draw_floaty_header_button" and
+        getattr(draw_func, "__module__", "").endswith(".floaty.ui.headers")
+    )
+
+
+def _remove_floaty_header_draw_funcs(header_type):
+    try:
+        draw_funcs = header_type._dyn_ui_initialize()
+    except AttributeError:
+        return
+
+    for draw_func in tuple(draw_funcs):
+        if draw_func is draw_floaty_header_button or _is_floaty_header_draw_func(draw_func):
+            header_type.remove(draw_func)
+
+
 def draw_floaty_header_button(self, context):
     area = context.area
     window = context.window
@@ -48,10 +73,9 @@ def draw_floaty_header_button(self, context):
 def register():
     global _appended_headers
 
-    for type_name in _HEADER_TYPES:
-        header_type = getattr(bpy.types, type_name, None)
-        if header_type is None or header_type in _appended_headers:
-            continue
+    _appended_headers = []
+    for header_type in _iter_header_types():
+        _remove_floaty_header_draw_funcs(header_type)
         header_type.append(draw_floaty_header_button)
         _appended_headers.append(header_type)
 
@@ -59,9 +83,6 @@ def register():
 def unregister():
     global _appended_headers
 
-    for header_type in _appended_headers:
-        try:
-            header_type.remove(draw_floaty_header_button)
-        except (AttributeError, ValueError):
-            pass
+    for header_type in set((*_appended_headers, *_iter_header_types())):
+        _remove_floaty_header_draw_funcs(header_type)
     _appended_headers = []

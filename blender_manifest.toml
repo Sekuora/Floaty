@@ -10,6 +10,9 @@ maintainer = "Trestle Trotter"
 # Supported types: "add-on", "theme"
 type = "add-on"
 
+
+tags = ["User Interface", "3D View", "Pipeline"]
+
 blender_version_min = "4.2.0"
 
 license = [
