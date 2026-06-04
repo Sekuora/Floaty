@@ -39,38 +39,6 @@ def _addon_package_name():
     return package_name.split(".")[0]
 
 
-class FLOATY_PG_workspace_snapshot(bpy.types.PropertyGroup):
-    name: bpy.props.StringProperty(
-        name="Name",
-        default="Workspace Snapshot",
-    )
-    workspace_name: bpy.props.StringProperty(
-        name="Workspace",
-        default="",
-    )
-    summary: bpy.props.StringProperty(
-        name="Summary",
-        default="",
-    )
-    data_json: bpy.props.StringProperty(
-        name="Snapshot Data",
-        default="{}",
-    )
-
-
-class FLOATY_PG_settings(bpy.types.PropertyGroup):
-    snapshot_name: bpy.props.StringProperty(
-        name="Snapshot Name",
-        description="Name for the next workspace snapshot",
-        default="Workspace Snapshot",
-    )
-    active_snapshot_index: bpy.props.IntProperty(
-        name="Active Snapshot",
-        default=0,
-        min=0,
-    )
-
-
 class FLOATY_AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = _addon_package_name()
 
@@ -164,10 +132,6 @@ class FLOATY_AddonPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_tag_redraw_on_update,
     )
-    workspace_snapshots: bpy.props.CollectionProperty(
-        type=FLOATY_PG_workspace_snapshot,
-    )
-
     def draw(self, context):
         layout = self.layout
         draw_visibility_settings(layout, self)
@@ -230,18 +194,3 @@ def get_addon_preferences(context=None):
             return preferences
     return None
 
-
-def get_workspace_snapshots(context=None):
-    preferences = get_addon_preferences(context)
-    if preferences is None:
-        return None
-    return preferences.workspace_snapshots
-
-
-def register():
-    bpy.types.WindowManager.floaty_settings = bpy.props.PointerProperty(type=FLOATY_PG_settings)
-
-
-def unregister():
-    if hasattr(bpy.types.WindowManager, "floaty_settings"):
-        del bpy.types.WindowManager.floaty_settings

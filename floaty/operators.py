@@ -1,6 +1,6 @@
 import bpy
 
-from . import properties, snapshots, state
+from . import state
 
 
 _PLACEMENT_ITEMS = (
@@ -481,68 +481,6 @@ class FLOATY_OT_cleanup_detached_windows(bpy.types.Operator):
     def execute(self, context):
         state.cleanup_closed_windows(context.window_manager)
         state.tag_redraw_all(context.window_manager)
-        return {"FINISHED"}
-
-
-class FLOATY_OT_save_workspace_snapshot(bpy.types.Operator):
-    bl_idname = "floaty.save_workspace_snapshot"
-    bl_label = "Save Workspace Snapshot"
-    bl_description = "Store the current Blender workspace, windows, detached editors, and editor sizes"
-
-    def execute(self, context):
-        settings = context.window_manager.floaty_settings
-        snapshot_data = snapshots.capture_workspace_snapshot(context, settings.snapshot_name)
-        stored_snapshots = properties.get_workspace_snapshots(context)
-        if stored_snapshots is None:
-            self.report({"ERROR"}, "Floaty could not access persistent add-on preferences")
-            return {"CANCELLED"}
-        snapshot = stored_snapshots.add()
-        snapshot.name = snapshot_data["name"]
-        snapshot.workspace_name = snapshot_data["workspace_name"]
-        snapshot.summary = snapshot_data["summary"]
-        snapshot.data_json = snapshots.snapshot_to_json(snapshot_data)
-        settings.active_snapshot_index = max(0, len(stored_snapshots) - 1)
-        return {"FINISHED"}
-
-
-class FLOATY_OT_restore_workspace_snapshot(bpy.types.Operator):
-    bl_idname = "floaty.restore_workspace_snapshot"
-    bl_label = "Restore Workspace Snapshot"
-    bl_description = "Switch back to the workspace stored in this snapshot"
-
-    snapshot_index: bpy.props.IntProperty(default=-1)
-
-    def execute(self, context):
-        stored_snapshots = properties.get_workspace_snapshots(context)
-        if stored_snapshots is None or not (0 <= self.snapshot_index < len(stored_snapshots)):
-            self.report({"ERROR"}, "Floaty could not find that workspace snapshot")
-            return {"CANCELLED"}
-
-        snapshot_data = snapshots.snapshot_from_json(stored_snapshots[self.snapshot_index].data_json)
-        if not snapshots.restore_workspace_snapshot(context, snapshot_data):
-            self.report({"ERROR"}, "Floaty could not restore this workspace snapshot")
-            return {"CANCELLED"}
-
-        context.window_manager.floaty_settings.active_snapshot_index = self.snapshot_index
-        return {"FINISHED"}
-
-
-class FLOATY_OT_delete_workspace_snapshot(bpy.types.Operator):
-    bl_idname = "floaty.delete_workspace_snapshot"
-    bl_label = "Delete Workspace Snapshot"
-    bl_description = "Remove this stored workspace snapshot"
-
-    snapshot_index: bpy.props.IntProperty(default=-1)
-
-    def execute(self, context):
-        stored_snapshots = properties.get_workspace_snapshots(context)
-        if stored_snapshots is None or not (0 <= self.snapshot_index < len(stored_snapshots)):
-            self.report({"ERROR"}, "Floaty could not find that workspace snapshot")
-            return {"CANCELLED"}
-
-        stored_snapshots.remove(self.snapshot_index)
-        settings = context.window_manager.floaty_settings
-        settings.active_snapshot_index = min(settings.active_snapshot_index, max(0, len(stored_snapshots) - 1))
         return {"FINISHED"}
 
 

@@ -1,64 +1,21 @@
-from pathlib import Path
-
-import bpy
-import bpy.utils.previews
-
-
-_preview_collection = None
-_icon_previews = {}
-_ICON_FILES = {
-    "attached": "blender_icon_window_atached.png",
-    "detached": "blender_icon_window_detached.png",
-}
-_FALLBACK_ICONS = {
-    "attached": "WINDOW",
-    "detached": "WINDOW",
-}
+ATTACHED_WINDOW_ICON = "AREA_DOCK"
+DETACHED_WINDOW_ICON = "AREA_SWAP"
 
 
 def register():
-    global _preview_collection, _icon_previews
-
-    if _preview_collection is not None:
-        return
-
-    _preview_collection = bpy.utils.previews.new()
-    _icon_previews = {}
-    icons_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
-    for icon_name, file_name in _ICON_FILES.items():
-        icon_path = icons_dir / file_name
-        if icon_path.exists():
-            _icon_previews[icon_name] = _preview_collection.load(
-                icon_name,
-                str(icon_path),
-                "IMAGE",
-            )
+    pass
 
 
 def unregister():
-    global _preview_collection, _icon_previews
-
-    if _preview_collection is None:
-        return
-
-    bpy.utils.previews.remove(_preview_collection)
-    _preview_collection = None
-    _icon_previews = {}
-
-
-def _get_icon(icon_name):
-    preview = _icon_previews.get(icon_name)
-    if preview is not None and preview.icon_id:
-        return {"icon_value": preview.icon_id}
-    return {"icon": _FALLBACK_ICONS[icon_name]}
+    pass
 
 
 def get_detach_icon():
-    return _get_icon("attached")
+    return {"icon": ATTACHED_WINDOW_ICON}
 
 
 def get_place_icon():
-    return _get_icon("detached")
+    return {"icon": DETACHED_WINDOW_ICON}
 
 
 def get_push_icon():
