@@ -1,5 +1,7 @@
 ### About
 
+![Cover Image Floaty](https://github.com/Sekuora/Floaty/blob/65949731f555d77b21de1526daa6a0f2a5d182f4/LogoImage_floaty.png)
+
 Floaty is a tool to open your blender editors into new windows and reorganize your workspace.
 
 Designed for simplicity and usability floaty brings unique time saving features to your workflow.
