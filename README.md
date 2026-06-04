@@ -7,6 +7,7 @@ Floaty is a tool to open your blender editors into new windows and reorganize yo
 Designed for simplicity and usability floaty brings unique time saving features to your workflow.
 
 With floaty you can create the workspace you need exactly how you need it.
+
 ---
 
 ### How to use
